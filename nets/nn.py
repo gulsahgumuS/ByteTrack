@@ -399,12 +399,19 @@ class BYTETracker:
 
     def update(self, boxes, scores, object_classes):
         self.frame_id += 1
+        print(f"boxes shape: {boxes.shape}")
+        print(f"scores shape: {scores.shape}")
+        print(f"object_classes shape: {object_classes.shape}")
         activated_tracks = []
         re_find_tracks = []
         lost_tracks = []
         removed_tracks = []
 
-        # add index
+        # 🛠️ HATA KORUMASI: boxes formatını kontrol et
+        if boxes.ndim != 2 or boxes.shape[1] != 4:
+            return numpy.empty((0, 8), dtype=numpy.float32)
+
+        # ID ekleme
         boxes = numpy.concatenate([boxes, numpy.arange(len(boxes)).reshape(-1, 1)], axis=-1)
 
         indices_low = scores > 0.1
