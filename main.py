@@ -1,127 +1,81 @@
 import cv2
 import numpy as np
-import torch
-import warnings
-
+from ultralytics import YOLO
 from nets import nn
-from utils import util
 
-warnings.filterwarnings("ignore")
-
-
-def draw_line(image, x1, y1, x2, y2, index):
-    w = 10
-    h = 10
-    color = (200, 0, 0)
-    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 200, 0), 2)
-    # Top left corner
-    cv2.line(image, (x1, y1), (x1 + w, y1), color, 3)
-    cv2.line(image, (x1, y1), (x1, y1 + h), color, 3)
-
-    # Top right corner
-    cv2.line(image, (x2, y1), (x2 - w, y1), color, 3)
-    cv2.line(image, (x2, y1), (x2, y1 + h), color, 3)
-
-    # Bottom right corner
-    cv2.line(image, (x2, y2), (x2 - w, y2), color, 3)
-    cv2.line(image, (x2, y2), (x2, y2 - h), color, 3)
-
-    # Bottom left corner
-    cv2.line(image, (x1, y2), (x1 + w, y2), color, 3)
-    cv2.line(image, (x1, y2), (x1, y2 - h), color, 3)
-
-    text = f'ID:{str(index)}'
-    cv2.putText(image, text,
-                (x1, y1 - 2),
-                0, 1 / 2, (0, 255, 0),
-                thickness=1, lineType=cv2.FILLED)
-
+def draw_box_with_id(image, box, track_id):
+    x1, y1, x2, y2 = map(int, box)
+    color = (0, 255, 0)
+    cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+    cv2.putText(image, f"ID: {track_id}", (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
 def main():
-    size = 640
-    model = torch.load('./weights/v8_n.pt', map_location='cuda')['model'].float()
-    model.eval()
-    model.half()
-    reader = cv2.VideoCapture('./demo/demo.mp4')
+    video_path = "demo/output_40s.mp4"
+    output_path = "demo/output_result.mp4"
 
-    # Check if camera opened successfully
-    if not reader.isOpened():
-        print("Error opening video stream or file")
-    fps = int(reader.get(cv2.CAP_PROP_FPS))
-    bytetrack = nn.BYTETracker(fps)
-    # Read until video is completed
-    while reader.isOpened():
-        # Capture frame-by-frame
-        success, frame = reader.read()
-        if success:
-            boxes = []
-            confidences = []
-            object_classes = []
+    # Video açılır
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"📛 Video açılamadı: {video_path}")
+        return
 
-            image = frame.copy()
-            shape = image.shape[:2]
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps == 0 or fps is None:
+        fps = 25
 
-            r = size / max(shape[0], shape[1])
-            if r != 1:
-                h, w = shape
-                image = cv2.resize(image,
-                                   dsize=(int(w * r), int(h * r)),
-                                   interpolation=cv2.INTER_LINEAR)
+    print(f"🎥 VideoWriter oluşturuluyor: width={width}, height={height}, fps={int(fps)}")
 
-            h, w = image.shape[:2]
-            image, ratio, pad = util.resize(image, size)
-            shapes = shape, ((h / shape[0], w / shape[1]), pad)
-            # Convert HWC to CHW, BGR to RGB
-            sample = image.transpose((2, 0, 1))[::-1]
-            sample = numpy.ascontiguousarray(sample)
-            sample = torch.unsqueeze(torch.from_numpy(sample), dim=0)
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, int(fps), (width, height))
 
-            sample = sample.cuda()
-            sample = sample.half()  # uint8 to fp16/32
-            sample = sample / 255  # 0 - 255 to 0.0 - 1.0
+    # YOLOv8 modelini yükle (kendi model yolunu yazabilirsin)
+    model = YOLO("./weights/best.pt")
 
-            # Inference
-            with torch.no_grad():
-                outputs = model(sample)
+    # ByteTrack başlat
+    tracker = nn.BYTETracker(frame_rate=fps)
 
-            # NMS
-            outputs = util.non_max_suppression(outputs, 0.001, 0.7)
-            for i, output in enumerate(outputs):
-                detections = output.clone()
-                util.scale(detections[:, :4], sample[i].shape[1:], shapes[0], shapes[1])
-                detections = detections.cpu().numpy()
-                for detection in detections:
-                    x1, y1, x2, y2 = list(map(int, detection[:4]))
-                    boxes.append([x1, y1, x2, y2])
-                    confidences.append(detection[4])
-                    object_classes.append(detection[5])
-            outputs = bytetrack.update(numpy.array(boxes),
-                                       numpy.array(confidences),
-                                       numpy.array(object_classes))
-            if len(outputs) > 0:
-                boxes = outputs[:, :4]
-                identities = outputs[:, 4]
-                object_classes = outputs[:, 6]
-                for i, box in enumerate(boxes):
-                    if object_classes[i] != 0:  # 0 is for person class (COCO)
-                        continue
-                    x1, y1, x2, y2 = list(map(int, box))
-                    # get ID of object
-                    index = int(identities[i]) if identities is not None else 0
+    frame_count = 0
+    valid_class_ids = [0]  # sadece plaka sınıfı (örnek: 0)
 
-                    draw_line(frame, x1, y1, x2, y2, index)
-            cv2.imshow('Frame', frame.astype('uint8'))
-            # Press Q on keyboard to  exit
-            if cv2.waitKey(25) & 0xFF == ord('q'):
-                break
-        # Break the loop
-        else:
+    while True:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            print("📛 Video bitti veya frame alınamadı.")
             break
-    # When everything done, release the video capture object
-    reader.release()
-    # Closes all the frames
-    cv2.destroyAllWindows()
 
+        frame_count += 1
+
+        # Nesne algılama
+        results = model(frame)[0]
+
+        boxes = results.boxes.xyxy.cpu().numpy()
+        scores = results.boxes.conf.cpu().numpy()
+        classes = results.boxes.cls.cpu().numpy().astype(int)
+
+        # Sadece plaka sınıfını filtrele
+        mask = np.isin(classes, valid_class_ids)
+        boxes = boxes[mask]
+        scores = scores[mask]
+        classes = classes[mask]
+
+        # ByteTrack güncelle
+        tracked_objects = tracker.update(boxes, scores, classes)
+
+        # Takip edilen plaka kutularını çiz
+        for obj in tracked_objects:
+            x1, y1, x2, y2, track_id = map(int, obj[:5])
+            draw_box_with_id(frame, (x1, y1, x2, y2), track_id)
+
+        out.write(frame)
+        print(f"✅ Frame {frame_count} işlendi.")
+
+    cap.release()
+    out.release()
+    cv2.destroyAllWindows()
+    print(f"🎥 Kayıt tamamlandı: {output_path}")
 
 if __name__ == "__main__":
     main()
